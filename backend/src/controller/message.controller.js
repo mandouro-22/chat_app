@@ -1,6 +1,7 @@
 import Message from "../models/message.model.js";
 import User from "../models/user.model.js";
 import cloudinary from "../lib/cloudinary.js";
+import { getReceiverSocketId, io } from "../lib/socket.js";
 
 export const getUsersForSidebar = async (req, res) => {
   try {
@@ -22,10 +23,11 @@ export const getMessages = async (req, res) => {
 
     const myMessages = await Message.find({
       $or: [
-        { sender: myId, recipient: userToChatId },
-        { sender: userToChatId, recipient: myId },
+        { senderId: myId, receiverId: userToChatId },
+        { senderId: userToChatId, receiverId: myId },
       ],
     });
+
     res.status(200).json(myMessages);
   } catch (error) {
     console.error("Error in Get Messages" + error.message);
@@ -37,29 +39,54 @@ export const sendMessage = async (req, res) => {
   try {
     const { image, text } = req.body;
     const { id: receiverId } = req.params;
-    const senderId = req.user._id;
+    const senderId = req?.user?._id;
 
-    let imageURL;
+    if (!senderId) {
+      return res
+        .status(401)
+        .json({ error: "Unauthorized: Sender ID is missing" });
+    }
+
+    if (!receiverId) {
+      return res.status(400).json({ error: "Receiver ID is required" });
+    }
+
+    if (!text && !image) {
+      return res
+        .status(400)
+        .json({ error: "Message text or image is required" });
+    }
+
+    let imageURL = null;
 
     if (image) {
-      // upload base64 image to cloudinary
-      const uploadResponse = await cloudinary.uploader.upload(image);
-      imageURL = uploadResponse.secure_url;
+      try {
+        const uploadResponse = await cloudinary.uploader.upload(image);
+        imageURL = uploadResponse.secure_url;
+      } catch (cloudinaryError) {
+        console.error("Cloudinary Upload Error:", cloudinaryError);
+        return res.status(500).json({ error: "Failed to upload image" });
+      }
     }
 
     const newMessage = new Message({
-      sender: senderId,
-      recipient: receiverId,
+      senderId: senderId,
+      receiverId: receiverId,
       text,
       image: imageURL,
     });
 
     await newMessage.save();
 
-    // todo: realtime functionality goes here => socket.io
+    const receiverSocketId = getReceiverSocketId(receiverId);
+    if (receiverSocketId) {
+      console.log(`Sending message to socket ID: ${receiverSocketId}`);
+      io.to(receiverSocketId).emit("newMessage", newMessage);
+    }
+
     res.status(201).json(newMessage);
   } catch (error) {
-    console.error("Error in Send Message Controller" + error.message);
+    console.error("Error in Send Message Controller:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
